@@ -1,0 +1,85 @@
+name: Deploy Laravel to AWS EB
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: eu-west-1
+
+      - name: Package Laravel install script for EB
+        run: |
+          mkdir -p .ebextensions
+          cat > .ebextensions/laravel.config <<'EOF'
+          files:
+            "/opt/elasticbeanstalk/hooks/appdeploy/pre/01_setup_laravel.sh":
+              mode: "000755"
+              owner: root
+              group: root
+              content: |
+                #!/bin/bash
+                set -e
+                APP_DIR="/var/app/current"
+
+                echo "🚀 Setting up Laravel in $APP_DIR"
+                cd $APP_DIR
+
+                echo "🧹 Cleaning current files..."
+                rm -rf * .[^.]*
+
+                echo "⬇️ Installing Laravel from public repo..."
+                if ! command -v composer &> /dev/null; then
+                  echo "Composer not found, installing composer..."
+                  EXPECTED_SIGNATURE="$(wget -q -O - https://composer.github.io/installer.sig)"
+                  php -r "copy('https://getcomposer.org/installer', 'composer-setup.php');"
+                  ACTUAL_SIGNATURE="$(php -r "echo hash_file('sha384', 'composer-setup.php');")"
+
+                  if [ "$EXPECTED_SIGNATURE" != "$ACTUAL_SIGNATURE" ]; then
+                    >&2 echo 'ERROR: Invalid installer signature'
+                    rm composer-setup.php
+                    exit 1
+                  fi
+
+                  php composer-setup.php --quiet
+                  rm composer-setup.php
+                  mv composer.phar /usr/local/bin/composer
+                fi
+
+                composer create-project laravel/laravel . "^11.0" --prefer-dist
+
+                echo "🔑 Generating app key..."
+                php artisan key:generate
+
+                echo "⚡ Running optimizations..."
+                php artisan config:cache
+                php artisan route:cache
+                php artisan view:cache
+
+                echo "✅ Laravel installed successfully."
+          EOF
+
+          zip -r deploy.zip .ebextensions -x "*.git*"
+
+      - name: Deploy to AWS Elastic Beanstalk
+        uses: einaregilsson/beanstalk-deploy@v22
+        with:
+          aws_access_key: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws_secret_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          application_name: "Backend Middey User App - Live"
+          environment_name: "BackendMiddeyUserApp-Live-env"
+          version_label: v-${{ github.run_number }}
+          region: eu-west-1
+          deployment_package: deploy.zip
